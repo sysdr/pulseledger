@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# PulseLedger Day 2 — cleanup.sh
+# Stops app processes and containers, prunes unused Docker resources, and
+# deletes local build artifacts so the tree is ready for `git push`.
+# PURGE=true also deletes the Postgres volume and prunes unused volumes.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+cd "$ROOT_DIR"
+
+echo "==> Stopping app processes"
+for name in backend frontend; do
+  pidfile="$ROOT_DIR/.run/$name.pid"
+  if [ -f "$pidfile" ]; then
+    pid="$(cat "$pidfile")"
+    kill "$pid" 2>/dev/null || true
+    rm -f "$pidfile"
+    echo "  Stopped $name (pid $pid)"
+  fi
+done
+# Catch processes whose pid files are gone (e.g. .run/ was deleted).
+for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+  for pid in $(ss -ltnpH "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do
+    kill "$pid" 2>/dev/null && echo "  Stopped process on :$port (pid $pid)"
+  done
+done
+
+echo "==> Docker"
+# `command -v docker` is not enough on WSL: the Docker Desktop shim exists
+# even when WSL integration is off, so ask the daemon directly.
+if docker info >/dev/null 2>&1; then
+  if [ "${PURGE:-false}" = "true" ]; then
+    "${COMPOSE[@]}" down --volumes --remove-orphans --rmi local
+    echo "  Stopped containers, removed project images and data volume"
+  else
+    "${COMPOSE[@]}" down --remove-orphans --rmi local
+    echo "  Stopped containers, removed project images; Postgres data kept in volume pgdata"
+  fi
+  docker container prune -f
+  docker image prune -af
+  docker network prune -f
+  docker builder prune -af
+  if [ "${PURGE:-false}" = "true" ]; then
+    docker volume prune -af
+  fi
+  echo "  Pruned unused containers, images, networks and build cache"
+else
+  echo "  Docker daemon not reachable; skipping container cleanup"
+fi
+
+echo "==> Removing build artifacts and local files"
+rm -rf \
+  "$ROOT_DIR/.venv" \
+  "$ROOT_DIR/.run" \
+  "$ROOT_DIR/.pytest_cache" \
+  "$ROOT_DIR/frontend/node_modules" \
+  "$ROOT_DIR/frontend/.next"
+find "$ROOT_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} +
+find "$ROOT_DIR" -type f \( -name "*.pyc" -o -name "*.tsbuildinfo" -o -name "*.log" -o -name ".DS_Store" \) -delete
+# .env may hold a real STRIPE_SECRET_KEY; build.sh recreates it from .env.example.
+rm -f "$ROOT_DIR/.env"
+
+echo "Cleanup complete"
